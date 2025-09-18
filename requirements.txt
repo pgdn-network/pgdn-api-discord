@@ -19,3 +19,4 @@ click==8.1.7
 
 # Testing (optional)
 pytest==7.4.3
+httpx==0.25.2

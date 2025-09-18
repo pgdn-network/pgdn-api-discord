@@ -17,7 +17,7 @@ from typing import Optional, List
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Boolean, DateTime,
-    ForeignKey, JSON, UUID, UniqueConstraint, Text, Enum as SQLEnum
+    ForeignKey, JSON, UUID, UniqueConstraint, Text, Enum as SQLEnum, BigInteger
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
@@ -138,7 +138,7 @@ class ValidatorLiteRequest(Base):
     id = Column(Integer, primary_key=True)
     uuid = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4)
     validator_id = Column(String(255), nullable=False)  # hostname/address to validate
-    discord_user_id = Column(Integer, nullable=False)
+    discord_user_id = Column(BigInteger, nullable=False)
     corp_email = Column(String(255))
     request_token = Column(String(255))  # claim token
     expires_at = Column(DateTime)
@@ -179,11 +179,22 @@ class RescanRequestLog(Base):
     id = Column(Integer, primary_key=True)
     uuid = Column(UUID(as_uuid=True), unique=True, nullable=False, default=uuid.uuid4)
     validator_id = Column(String(255), nullable=False)
-    discord_user_id = Column(Integer, nullable=False)
+    discord_user_id = Column(BigInteger, nullable=False)
     node_uuid = Column(UUID(as_uuid=True), ForeignKey('nodes.uuid'))
     lite_request_uuid = Column(UUID(as_uuid=True), ForeignKey('validator_lite_requests.uuid'))
     ip_address = Column(String(45))
     created_at = Column(DateTime, nullable=False, default=func.now())
+
+class DiscordGuildVerification(Base):
+    """Discord guild membership verification records."""
+    __tablename__ = 'discord_guild_verifications'
+
+    discord_user_id = Column(BigInteger, primary_key=True)
+    is_verified = Column(Boolean, nullable=False, default=False)
+    verified_until = Column(DateTime)
+    last_checked_at = Column(DateTime, nullable=False, default=func.now())
+    source = Column(Text, default='oauth_guilds')
+    allowed_guild_ids = Column(Text)
 
 class NodeTimeseries(Base):
     """Node timeseries data for info display."""
@@ -323,6 +334,65 @@ def validate_node_address(address: str) -> tuple[bool, Optional[str]]:
     return True, None
 
 
+def mark_verified(session: Session, user_id: int, until: datetime, allowed_ids: List[str]) -> None:
+    """Mark Discord user as verified in guild."""
+    from sqlalchemy import text
+
+    guild_ids_str = ",".join(allowed_ids) if allowed_ids else ""
+
+    # Upsert query
+    stmt = text("""
+        INSERT INTO discord_guild_verifications
+        (discord_user_id, is_verified, verified_until, last_checked_at, source, allowed_guild_ids)
+        VALUES (:user_id, true, :until, :now, 'oauth_guilds', :guild_ids)
+        ON CONFLICT (discord_user_id)
+        DO UPDATE SET
+            is_verified = true,
+            verified_until = :until,
+            last_checked_at = :now,
+            source = 'oauth_guilds',
+            allowed_guild_ids = :guild_ids
+    """)
+
+    session.execute(stmt, {
+        'user_id': user_id,
+        'until': until,
+        'now': datetime.utcnow(),
+        'guild_ids': guild_ids_str
+    })
+    session.commit()
+
+def mark_unverified(session: Session, user_id: int, allowed_ids: List[str]) -> None:
+    """Mark Discord user as unverified in guild."""
+    from sqlalchemy import text
+
+    guild_ids_str = ",".join(allowed_ids) if allowed_ids else ""
+
+    # Upsert query - don't update verified_until if it's in the future
+    stmt = text("""
+        INSERT INTO discord_guild_verifications
+        (discord_user_id, is_verified, verified_until, last_checked_at, source, allowed_guild_ids)
+        VALUES (:user_id, false, NULL, :now, 'oauth_guilds', :guild_ids)
+        ON CONFLICT (discord_user_id)
+        DO UPDATE SET
+            is_verified = false,
+            last_checked_at = :now,
+            source = 'oauth_guilds',
+            allowed_guild_ids = :guild_ids,
+            verified_until = CASE
+                WHEN discord_guild_verifications.verified_until IS NULL OR discord_guild_verifications.verified_until < :now
+                THEN NULL
+                ELSE discord_guild_verifications.verified_until
+            END
+    """)
+
+    session.execute(stmt, {
+        'user_id': user_id,
+        'now': datetime.utcnow(),
+        'guild_ids': guild_ids_str
+    })
+    session.commit()
+
 def get_user_validators(session: Session, discord_user_id: int) -> dict:
     """Get all validators for a Discord user."""
     try:
@@ -336,20 +406,12 @@ def get_user_validators(session: Session, discord_user_id: int) -> dict:
         primary_validator_id = None
 
         for req in validated_requests:
-            # Get associated node if available
-            node = None
-            if req.node_uuid:
-                node = session.query(Node).filter(Node.uuid == req.node_uuid).first()
-
             validator_info = {
                 "validator_id": req.validator_id,
-                "validator_address": node.ip_addresses[0].ip_address if node and node.ip_addresses else req.validation_ip,
+                "validator_address": req.validation_ip,
                 "status": "active" if req.status == ValidatorLiteRequestStatus.VALIDATED else "inactive",
                 "last_validated": req.updated_at,
-                "expires_at": req.expires_at,
-                "nickname": None,  # Not stored in current schema
-                "trust_score": node.trust_score if node and hasattr(node, 'trust_score') else None,
-                "last_scan_status": "completed" if req.status == ValidatorLiteRequestStatus.VALIDATED else "pending"
+                "expires_at": req.expires_at
             }
             validators.append(validator_info)
 
@@ -357,16 +419,24 @@ def get_user_validators(session: Session, discord_user_id: int) -> dict:
             if primary_validator_id is None:
                 primary_validator_id = req.validator_id
 
-        return {
-            "validators": validators,
-            "total_count": len(validators),
-            "primary_validator_id": primary_validator_id
-        }
+        # Return appropriate structure based on count
+        if len(validators) == 0:
+            return {
+                "validators": [],
+                "total_count": 0,
+                "score": None
+            }
+        else:
+            return {
+                "validators": validators,
+                "total_count": len(validators),
+                "primary_validator_id": primary_validator_id
+            }
 
     except Exception as e:
         logger.error(f"Error fetching user validators: {e}")
         return {
             "validators": [],
             "total_count": 0,
-            "primary_validator_id": None
+            "score": None
         }

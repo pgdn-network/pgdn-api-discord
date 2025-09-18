@@ -4,16 +4,18 @@ Ultra-minimal lite validation FastAPI app.
 
 import logging
 import os
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-# Import our separated routers and cache
-from app.routers.lite_validation import public_router, private_router
-from app.services.redis_cache import get_redis_cache
+# Load environment variables FIRST before importing routers
+load_dotenv(override=True)
 
-# Load environment variables
-load_dotenv()
+# Import our separated routers and cache AFTER loading env vars
+from app.routers.lite_validation import public_router, private_router
+from app.routers.discord_oauth import public_router as discord_public_router, private_router as discord_private_router
+from app.services.redis_cache import get_redis_cache
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +42,10 @@ app.add_middleware(
 # Include separated public and private lite validation routers
 app.include_router(public_router, prefix="/api/v1/lite/public", tags=["lite-validation-public"])
 app.include_router(private_router, prefix="/api/v1/lite/private", tags=["lite-validation-private"])
+
+# Include Discord OAuth routers
+app.include_router(discord_public_router, prefix="/api/v1/lite/public/discord", tags=["discord-oauth-public"])
+app.include_router(discord_private_router, prefix="/api/v1/lite/private/discord", tags=["discord-oauth-private"])
 
 @app.get("/")
 def root():

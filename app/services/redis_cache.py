@@ -190,6 +190,71 @@ class LiteValidationCache:
         result = await cache.set_with_expiry(key, "welcomed", 31536000)
         return result
 
+    async def check_daily_add_limit(self, discord_user_id: int) -> bool:
+        """Check daily add limit (1 per day per user)."""
+        cache = await self._get_redis()
+        key = f"lite_add:{discord_user_id}:daily"
+        result = await cache.get(key)
+        return result is not None
+
+    async def set_daily_add_limit(self, discord_user_id: int) -> bool:
+        """Set daily add limit."""
+        cache = await self._get_redis()
+        key = f"lite_add:{discord_user_id}:daily"
+        return await cache.set_with_expiry(key, "requested", 86400)
+
+    # Guild Verification Caching
+    async def get_guild_verification_status(self, discord_user_id: int) -> Optional[str]:
+        """Get guild verification status from Redis cache with database fallback."""
+        cache = await self._get_redis()
+        key = f"discord.verified:{discord_user_id}"
+        result = await cache.get(key)
+
+        # If not in Redis, check database for unexpired verification
+        if result is None:
+            from app.models.database import get_db_session, DiscordGuildVerification
+            from datetime import datetime
+
+            try:
+                with get_db_session() as session:
+                    verification = session.query(DiscordGuildVerification).filter(
+                        DiscordGuildVerification.discord_user_id == discord_user_id
+                    ).first()
+
+                    if verification and verification.is_verified:
+                        # Check if verification is still valid (not expired)
+                        if verification.verified_until and verification.verified_until > datetime.utcnow():
+                            # Re-populate Redis cache with remaining TTL
+                            remaining_seconds = int((verification.verified_until - datetime.utcnow()).total_seconds())
+                            if remaining_seconds > 0:
+                                await cache.set_with_expiry(key, "1", remaining_seconds)
+                                return "1"
+
+                    # If no valid verification found, return None (not verified)
+                    return None
+            except Exception as e:
+                # Log error but don't fail - just return None
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Database fallback check failed for user {discord_user_id}: {e}")
+                return None
+
+        return result
+
+    async def set_guild_verification_success(self, discord_user_id: int, ttl_days: int = 7) -> bool:
+        """Set successful guild verification with TTL in days."""
+        cache = await self._get_redis()
+        key = f"discord.verified:{discord_user_id}"
+        ttl_seconds = ttl_days * 86400
+        return await cache.set_with_expiry(key, "1", ttl_seconds)
+
+    async def set_guild_verification_failure(self, discord_user_id: int, ttl_minutes: int = 10) -> bool:
+        """Set failed guild verification with TTL in minutes (negative cache)."""
+        cache = await self._get_redis()
+        key = f"discord.verified:{discord_user_id}"
+        ttl_seconds = ttl_minutes * 60
+        return await cache.set_with_expiry(key, "0", ttl_seconds)
+
 # Global instance
 def get_lite_validation_cache() -> LiteValidationCache:
     """Get lite validation cache instance."""

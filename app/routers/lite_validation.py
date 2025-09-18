@@ -10,10 +10,8 @@ import os
 import secrets
 import logging
 import requests
-import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
-from collections import defaultdict, deque
 from fastapi import APIRouter, HTTPException, status, Request, Depends, Header
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import and_
@@ -45,26 +43,6 @@ DISCORD_API_AUTH_TOKEN = os.getenv("DISCORD_API_AUTH_TOKEN")
 DISCORD_BOT_WEBHOOK_URL = os.getenv("DISCORD_BOT_WEBHOOK_URL", "http://localhost:8080/webhook/send-message")
 DISCORD_NOTIFICATION_CHANNEL = os.getenv("DISCORD_NOTIFICATION_CHANNEL")
 
-# Simple in-memory rate limiting
-_rate_limits: Dict[str, deque] = defaultdict(deque)
-
-def check_rate_limit(client_ip: str, path: str, max_requests: int = 5, window: int = 3600) -> bool:
-    """Simple in-memory rate limiting."""
-    current_time = time.time()
-    key = f"{client_ip}:{path}"
-
-    # Clean old requests
-    request_times = _rate_limits[key]
-    while request_times and current_time - request_times[0] > window:
-        request_times.popleft()
-
-    # Check if under limit
-    if len(request_times) >= max_requests:
-        return False
-
-    # Add current request
-    request_times.append(current_time)
-    return True
 
 def verify_discord_bot_token(authorization: Optional[str] = Header(None)) -> str:
     """Verify Discord bot token from Authorization header."""
@@ -101,6 +79,33 @@ def verify_discord_bot_token(authorization: Optional[str] = Header(None)) -> str
         )
 
     return token
+
+@private_router.get("/verify/{discord_user_id}")
+async def get_verification_status(discord_user_id: int, auth_token: str = Depends(verify_discord_bot_token)):
+    """
+    PRIVATE: Check Discord user verification status with database fallback.
+
+    Used by Discord bot to check if user is verified. Automatically falls back
+    to database when Redis cache is empty and repopulates cache if valid.
+
+    URL: /api/v1/lite/private/verify/{discord_user_id}
+    """
+    logger.info(f"Checking verification status for user {discord_user_id}")
+
+    try:
+        cache = get_lite_validation_cache()
+        status = await cache.get_guild_verification_status(discord_user_id)
+
+        if status in ["1", b"1"]:
+            logger.info(f"User {discord_user_id} is verified")
+            return {"verified": True}
+        else:
+            logger.info(f"User {discord_user_id} is not verified")
+            return {"verified": False}
+
+    except Exception as e:
+        logger.error(f"Error checking verification status for user {discord_user_id}: {e}")
+        return {"verified": False}
 
 def send_discord_validation_success_notification(discord_user_id: int, validator_id: str) -> bool:
     """Send Discord webhook notification for successful validator validation."""
@@ -160,8 +165,7 @@ def send_discord_admin_notification(action: str, discord_user_id: int, validator
             message = f"User {discord_user_id} performed {action} on validator: {validator_id}"
 
         payload = {
-            "user_id": discord_user_id,
-            "message": message
+            "content": message
         }
 
         response = requests.post(
@@ -184,6 +188,32 @@ def send_discord_admin_notification(action: str, discord_user_id: int, validator
     except Exception as e:
         logger.error(f"Unexpected error sending Discord admin notification: {e}")
         return False
+
+def validate_validator_url(validator_id: str) -> tuple[bool, str]:
+    """Validate that validator_id is a proper hostname/domain format."""
+    import re
+
+    if not validator_id or len(validator_id.strip()) == 0:
+        return False, "Validator URL cannot be empty"
+
+    validator_id = validator_id.strip().lower()
+
+    # Must be valid hostname/domain format with at least one dot
+    # Pattern: subdomain.domain.tld or domain.tld
+    hostname_pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+$'
+
+    if not re.match(hostname_pattern, validator_id):
+        return False, "Invalid hostname/domain format. Please provide a valid validator URL (e.g. validator.example.com)"
+
+    # Additional checks
+    if len(validator_id) > 253:  # Max hostname length
+        return False, "Hostname too long"
+
+    # Must contain at least one dot (reject single words like "asdfasdf")
+    if '.' not in validator_id:
+        return False, "Invalid hostname/domain format. Please provide a valid validator URL (e.g. validator.example.com)"
+
+    return True, "Valid URL format"
 
 def validate_validator_ip(validator_id: str, client_ip: str, session: Session) -> tuple[bool, Optional[str], Optional[str]]:
     """Validate that client IP matches a node with the given validator_id."""
@@ -278,14 +308,7 @@ async def validate_validator_ownership(
 
     URL: /api/v1/lite/public/validate/{validator_id}
     """
-    # Rate limiting
     client_ip = get_client_ip(fastapi_request)
-    if not check_rate_limit(client_ip, "/public/validate", max_requests=2, window=3600):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded."
-        )
-
     logger.info(f"Public validation attempt for validator_id: {validator_id}")
 
     cache = get_lite_validation_cache()
@@ -433,13 +456,6 @@ async def claim_validator_validation(
 
     URL: /api/v1/lite/private/claim
     """
-    # Rate limiting
-    client_ip = get_client_ip(fastapi_request)
-    if not check_rate_limit(client_ip, "/private/claim", max_requests=5, window=3600):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded. Please try again later."
-        )
 
     logger.info(f"Private validation request for validator_id: {request_data.validator_id}, discord_user_id: {request_data.discord_user_id}")
 
@@ -455,11 +471,16 @@ async def claim_validator_validation(
 
     try:
         with get_db_session() as session:
+            import time
+            start_time = time.time()
+
             # Check max open/pending requests
+            logger.info(f"Starting open requests count query for user {request_data.discord_user_id}")
             open_requests_count = session.query(ValidatorLiteRequest).filter(
                 ValidatorLiteRequest.discord_user_id == request_data.discord_user_id,
                 ValidatorLiteRequest.status.in_([ValidatorLiteRequestStatus.ISSUED, ValidatorLiteRequestStatus.EXPIRED, ValidatorLiteRequestStatus.FAILED])
             ).count()
+            logger.info(f"Open requests count query completed in {time.time() - start_time:.2f}s")
 
             if open_requests_count >= 10:
                 raise HTTPException(
@@ -468,10 +489,13 @@ async def claim_validator_validation(
                 )
 
             # Check max validated requests
+            start_time = time.time()
+            logger.info(f"Starting validated requests count query for user {request_data.discord_user_id}")
             validated_requests_count = session.query(ValidatorLiteRequest).filter(
                 ValidatorLiteRequest.discord_user_id == request_data.discord_user_id,
                 ValidatorLiteRequest.status == ValidatorLiteRequestStatus.VALIDATED
             ).count()
+            logger.info(f"Validated requests count query completed in {time.time() - start_time:.2f}s")
 
             if validated_requests_count >= 10:
                 raise HTTPException(
@@ -480,7 +504,10 @@ async def claim_validator_validation(
                 )
 
             # Check if validator exists in the system
+            start_time = time.time()
+            logger.info(f"Starting node lookup query for validator {request_data.validator_id}")
             node = session.query(Node).filter(Node.address == request_data.validator_id).first()
+            logger.info(f"Node lookup query completed in {time.time() - start_time:.2f}s")
             if not node:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -553,106 +580,122 @@ async def claim_validator_validation(
             detail="Failed to create validation request"
         )
 
+@private_router.get("/info", response_model=ValidatorNodeInfoResponse)
 @private_router.get("/info/{validator_address}", response_model=ValidatorNodeInfoResponse)
 async def get_validator_info(
-    validator_address: str,
     discord_user_id: int,
     fastapi_request: Request,
-    token: str = Depends(verify_discord_bot_token)
+    token: str = Depends(verify_discord_bot_token),
+    validator_address: Optional[str] = None
 ):
     """
     PRIVATE: Get validator node information for Discord slash command.
 
-    Requires that the Discord user has successfully validated the validator
-    within the last 90 days. Rate limited to 1 request per minute per user per validator.
+    Logic:
+    - No address + 0 validators: Error "must provide address"
+    - No address + 1 validator: Return full data for that validator
+    - No address + >1 validators: Return validator list
+    - With address + owned: Return full data
+    - With address + not owned: Return score only
 
-    URL: /api/v1/lite/private/info/{validator_address}
+    Rate limited to 1 request per minute per user per validator.
     """
-    logger.info(f"Discord info request for validator {validator_address} from user {discord_user_id}")
+    logger.info(f"Discord info request for validator {validator_address or 'unspecified'} from user {discord_user_id}")
 
     cache = get_lite_validation_cache()
 
     try:
         with get_db_session() as session:
-            # Check Discord user authority and daily rate limit
-            authorized, node, last_validated, message = await check_discord_authority_and_rate_limit(
-                validator_address, discord_user_id, session, cache
-            )
+            # First, get user's validators from validator_lite_requests
+            user_validators = session.query(ValidatorLiteRequest).filter(
+                ValidatorLiteRequest.discord_user_id == discord_user_id,
+                ValidatorLiteRequest.status == ValidatorLiteRequestStatus.VALIDATED
+            ).all()
 
-            if not authorized:
-                if "Rate limit exceeded" in message:
+            validator_count = len(user_validators)
+
+            # Handle case where no validator_address provided
+            if not validator_address:
+                if validator_count == 0:
                     raise HTTPException(
-                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                        detail=message
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="You must provide a validator address"
                     )
+                elif validator_count == 1:
+                    # Use the single validator they have
+                    validator_address = user_validators[0].validator_id
                 else:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=message
+                    # Return list of validators
+                    validator_list = [{"validator_id": v.validator_id, "last_validated": v.updated_at} for v in user_validators]
+                    return ValidatorNodeInfoResponse(
+                        success=True,
+                        validator_address="multiple",
+                        discord_user_id=discord_user_id,
+                        message="Multiple validators found. Please specify one.",
+                        node_data={"validators": validator_list, "count": validator_count}
                     )
 
-            # Set daily rate limit AFTER successful authorization
+            # Check if user owns this validator
+            user_owns_validator = any(v.validator_id == validator_address for v in user_validators)
+
+            # Rate limit check for all requests
+            if await cache.check_daily_info_limit(discord_user_id, validator_address):
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Rate limit exceeded. You can only check validator info once per minute."
+                )
+
+            # Set rate limit
             await cache.set_daily_info_limit(discord_user_id, validator_address)
 
-            # Query for latest timeseries data by node UUID as node_key
-            timeseries_record = session.query(NodeTimeseries).filter(
-                NodeTimeseries.node_key == str(node.uuid)
-            ).order_by(NodeTimeseries.observed_ts.desc()).first()
+            # Get data from sui_scanner.node_timeseries
+            from sqlalchemy import text
+            result = session.execute(text(
+                "SELECT * FROM sui_scanner.node_timeseries WHERE hostname = :hostname ORDER BY observed_ts DESC LIMIT 1"
+            ), {"hostname": validator_address})
 
-            # Prepare comprehensive node data response
-            node_data = {
-                # Basic node info
-                "uuid": str(node.uuid),
-                "name": node.name,
-                "address": node.address,
-                "status": node.status,
-                "simple_state": node.simple_state.value if node.simple_state else None,
-                "validated": node.validated,
-                "discovery_status": node.discovery_status.value if node.discovery_status else None,
-                "connectivity_status": node.connectivity_status.value if node.connectivity_status else None,
-                "network": node.network,
-                "node_type": node.node_type,
-                "active": node.active,
-                "created_at": node.created_at.isoformat() if node.created_at else None,
-                "updated_at": node.updated_at.isoformat() if node.updated_at else None
-            }
+            row = result.fetchone()
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Validator not found"
+                )
 
-            # Add active IP addresses if available
-            if node.resolved_ips:
-                active_ips = [ip.ip_address for ip in node.resolved_ips if ip.active]
-                node_data["active_ips"] = active_ips
+            if user_owns_validator:
+                # Return full data for owned validators
+                user_validator = next((v for v in user_validators if v.validator_id == validator_address), None)
+                last_validated = user_validator.updated_at if user_validator else None
+
+                node_data = {
+                    "hostname": row.hostname,
+                    "latest_score": row.latest_score,
+                    "tps": row.tps,
+                    "cps": row.cps,
+                    "uptime_status": row.uptime_status,
+                    "total_cves": row.total_cves,
+                    "ssh_open": row.ssh_open,
+                    "docker_open": row.docker_open,
+                    "rpc_reachable": row.rpc_reachable,
+                    "observed_ts": row.observed_ts.isoformat() if row.observed_ts else None
+                }
+
+                return ValidatorNodeInfoResponse(
+                    success=True,
+                    validator_address=validator_address,
+                    discord_user_id=discord_user_id,
+                    node_data=node_data,
+                    message="Node information retrieved successfully",
+                    last_validated=last_validated
+                )
             else:
-                node_data["active_ips"] = []
-
-            # Add timeseries metrics if available
-            if timeseries_record:
-                node_data.update({
-                    "tps": float(timeseries_record.tps) if timeseries_record.tps else None,
-                    "cps": float(timeseries_record.cps) if timeseries_record.cps else None,
-                    "uptime_status": timeseries_record.uptime_status,
-                    "latest_score": timeseries_record.latest_score,
-                    "total_cves": timeseries_record.total_cves,
-                    "ssh_open": timeseries_record.ssh_open,
-                    "docker_open": timeseries_record.docker_open,
-                    "rpc_reachable": timeseries_record.rpc_reachable,
-                    "observed_ts": timeseries_record.observed_ts.isoformat() if timeseries_record.observed_ts else None,
-                })
-            else:
-                node_data.update({
-                    "tps": None,
-                    "cps": None,
-                    "uptime_status": None,
-                    "data_available": False
-                })
-
-            return ValidatorNodeInfoResponse(
-                success=True,
-                validator_address=validator_address,
-                discord_user_id=discord_user_id,
-                node_data=node_data,
-                message="Node information retrieved successfully",
-                last_validated=last_validated
-            )
+                # Return only score for non-owned validators
+                return ValidatorNodeInfoResponse(
+                    success=True,
+                    validator_address=validator_address,
+                    discord_user_id=discord_user_id,
+                    message="Score retrieved successfully",
+                    node_data={"score": row.latest_score}
+                )
 
     except HTTPException:
         raise
@@ -845,17 +888,42 @@ async def add_validator_request(
 
     URL: /api/v1/lite/private/add
     """
-    # Rate limiting
-    client_ip = get_client_ip(fastapi_request)
-    if not check_rate_limit(client_ip, "/private/add", max_requests=3, window=3600):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Rate limit exceeded. Please try again later."
-        )
-
     logger.info(f"Validator add request for validator_id: {request_data.validator_id}, discord_user_id: {request_data.discord_user_id}")
 
     try:
+        # Get Redis cache for rate limiting
+        cache = get_lite_validation_cache()
+
+        # Check daily rate limit (1 per day per user)
+        # Check daily submission limit (10 per day)
+        daily_count = 0
+        try:
+            # Count submissions in last 24 hours instead of using cache flag
+            from datetime import datetime, timedelta
+            twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+
+            with get_db_session() as session:
+                daily_count = session.query(ValidatorLiteRequest).filter(
+                    ValidatorLiteRequest.discord_user_id == request_data.discord_user_id,
+                    ValidatorLiteRequest.created_at >= twenty_four_hours_ago
+                ).count()
+        except Exception as e:
+            logger.warning(f"Could not check daily limit: {e}")
+
+        if daily_count >= 10:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="You have reached the maximum number of validator submissions for today."
+            )
+
+        # Validate URL format
+        is_valid_url, url_error_message = validate_validator_url(request_data.validator_id)
+        if not is_valid_url:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=url_error_message
+            )
+
         with get_db_session() as session:
             # Check if validator already exists in the system
             existing_node = session.query(Node).filter(Node.address == request_data.validator_id).first()
@@ -865,12 +933,6 @@ async def add_validator_request(
                     detail="Validator already exists in system"
                 )
 
-            # Basic validator format validation (same as existing validation)
-            if not request_data.validator_id or len(request_data.validator_id.strip()) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid validator format"
-                )
 
             # Send Discord admin notification
             send_discord_admin_notification("add", request_data.discord_user_id, request_data.validator_id)

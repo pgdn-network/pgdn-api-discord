@@ -84,5 +84,59 @@ def test_add_validator_missing_param():
     })
     assert response.status_code == 422  # Validation error for missing required parameters
 
+def test_add_validator_invalid_url():
+    """Test add validator with invalid URL format."""
+    import os
+    # Get the real token from environment for testing
+    real_token = os.getenv("DISCORD_API_AUTH_TOKEN", "cpWGkrKD21qHV2PZUHfB_vqMsO7X0y-bEAdcuz2SIb8")
+    response = client.post("/api/v1/lite/private/add", json={
+        "validator_id": "asdfasdf",  # Invalid URL - no domain
+        "discord_user_id": 123456789
+    }, headers={
+        "Authorization": f"Bearer {real_token}"
+    })
+    assert response.status_code == 400
+    data = response.json()
+    assert "Invalid hostname/domain format" in data["detail"]
+
+def test_add_validator_empty_url():
+    """Test add validator with empty URL (Pydantic validation should catch this)."""
+    import os
+    real_token = os.getenv("DISCORD_API_AUTH_TOKEN", "cpWGkrKD21qHV2PZUHfB_vqMsO7X0y-bEAdcuz2SIb8")
+    response = client.post("/api/v1/lite/private/add", json={
+        "validator_id": "",  # Empty URL
+        "discord_user_id": 123456789
+    }, headers={
+        "Authorization": f"Bearer {real_token}"
+    })
+    assert response.status_code == 422  # Pydantic validation error
+    data = response.json()
+    assert "detail" in data
+
+def test_add_validator_no_dot_url():
+    """Test add validator with no dot in URL."""
+    import os
+    real_token = os.getenv("DISCORD_API_AUTH_TOKEN", "cpWGkrKD21qHV2PZUHfB_vqMsO7X0y-bEAdcuz2SIb8")
+    response = client.post("/api/v1/lite/private/add", json={
+        "validator_id": "localhost",  # No dot in hostname
+        "discord_user_id": 123456789
+    }, headers={
+        "Authorization": f"Bearer {real_token}"
+    })
+    assert response.status_code == 400
+    data = response.json()
+    assert "Invalid hostname/domain format" in data["detail"]
+
+def test_add_validator_valid_url_format():
+    """Test add validator with valid URL format (will fail auth but URL validation should pass)."""
+    response = client.post("/api/v1/lite/private/add", json={
+        "validator_id": "validator.example.com",  # Valid URL format
+        "discord_user_id": 123456789
+    }, headers={
+        "Authorization": "Bearer invalid_token"
+    })
+    # Should fail with 401 (invalid token) not 400 (invalid URL format)
+    assert response.status_code == 401
+
 if __name__ == "__main__":
     pytest.main([__file__])

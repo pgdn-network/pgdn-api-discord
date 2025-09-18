@@ -4,6 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Development Commands
 
+### Database Setup
+```bash
+# The application will auto-create tables on startup, but you may need to create the database first
+createdb depin
+
+# Run the application to auto-create tables
+python main.py
+```
+
 ### Running the Application
 ```bash
 # Activate virtual environment BEFORE running commands
@@ -156,6 +165,37 @@ The application uses PostgreSQL with SQLAlchemy ORM. Key relationships:
 3. Handle results via Redis pub/sub system for real-time updates
 4. Mock PGDN services in tests
 
+## Discord OAuth2 Guild Verification
+
+The application now includes Discord OAuth2 guild verification endpoints under `/api/v1/lite/public/discord/`:
+
+### Endpoints
+- `GET /api/v1/lite/public/discord/start?state=<state>` - Start OAuth2 flow (public, no auth required)
+- `GET /api/v1/lite/public/discord/callback?code=...&state=...` - Handle OAuth2 callback (public, no auth required)
+
+### Flow Overview
+1. Discord bot generates state token using HMAC-signed format: `user_id:timestamp:mac`
+2. Bot calls `/start` endpoint with state parameter
+3. User is redirected to Discord OAuth2 authorization
+4. Discord redirects back to `/callback` with authorization code
+5. System exchanges code for token, fetches user's guilds, validates membership
+6. Results cached in Redis and persisted in database
+
+### Security Features
+- **State Validation**: HMAC-signed state tokens prevent CSRF and user ID spoofing
+- **10-minute Expiry**: State tokens expire after 10 minutes
+- **Constant-time Comparison**: HMAC validation uses constant-time comparison
+- **Base64url Encoding**: URL-safe encoding for state tokens
+
+### Caching Strategy
+- **Success**: Redis key `discord.verified:{user_id}` = "1" with 7-day TTL
+- **Failure**: Redis key `discord.verified:{user_id}` = "0" with 10-minute TTL (negative cache)
+- **Database**: Persistent record with verification status and expiration
+
+### Optional Features
+- **Bot DM**: Sends success DM when `BOT_TOKEN` is configured
+- **Admin Notifications**: Can be integrated with existing notification system
+
 ## Environment Variables
 
 ### Required
@@ -171,6 +211,18 @@ The application uses PostgreSQL with SQLAlchemy ORM. Key relationships:
 - `AI_PROVIDER_REPORTING`: AI provider for reporting (openai/anthropic)
 - `ANTHROPIC_API_KEY`: Anthropic API key for AI analysis
 - `OPENAI_API_KEY`: OpenAI API key for AI analysis
+
+### Discord OAuth2 Variables
+- `OAUTH_CLIENT_ID`: Discord OAuth2 application client ID
+- `OAUTH_CLIENT_SECRET`: Discord OAuth2 application client secret
+- `OAUTH_REDIRECT_URI`: OAuth2 redirect URI (must match Discord application settings)
+- `STATE_SIGNING_KEY`: HMAC signing key (32+ characters for security)
+- `ALLOWED_GUILD_IDS`: Comma-separated list of Discord guild IDs to verify membership
+- `VERIFY_SUCCESS_TTL_DAYS`: Success verification TTL in days (default: 7)
+- `VERIFY_FAIL_TTL_MINUTES`: Failure verification TTL in minutes (default: 10)
+- `MIN_ACCOUNT_AGE_DAYS`: Minimum Discord account age in days (default: 7)
+- `BOT_TOKEN`: Discord bot token for sending success DMs (optional)
+- `OAUTH_BASE`: Discord API base URL (default: https://discord.com/api)
 
 ## Docker Build Requirements
 
