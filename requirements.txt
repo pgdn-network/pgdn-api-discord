@@ -14,5 +14,8 @@ redis[hiredis]==5.0.1
 # HTTP requests for Discord webhooks
 requests==2.31.0
 
+# Command line interface (dependency for some packages)
+click==8.1.7
+
 # Testing (optional)
 pytest==7.4.3

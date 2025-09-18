@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Install dependencies
 COPY requirements.txt .
-RUN pip install --no-deps -r requirements.txt
+RUN pip install -r requirements.txt
 
 # Copy organized app structure
 COPY main.py .

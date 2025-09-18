@@ -14,15 +14,24 @@ from main import app
 
 client = TestClient(app)
 
+def test_root_endpoint():
+    """Test root endpoint."""
+    response = client.get("/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["message"] == "Lite Validation API"
+    assert data["version"] == "0.1.0"
+    assert data["status"] == "running"
+
 def test_health_check():
     """Test health check endpoint."""
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "healthy", "version": "0.1.0"}
 
-def test_request_validation_missing_auth():
-    """Test validation request without auth header."""
-    response = client.post("/api/v1/lite/private/request", json={
+def test_claim_validation_missing_auth():
+    """Test validation claim without auth header."""
+    response = client.post("/api/v1/lite/private/claim", json={
         "validator_id": "test.validator.com",
         "discord_user_id": 123456789
     })
@@ -59,6 +68,21 @@ def test_validators_missing_param():
         "Authorization": "Bearer test_token"
     })
     assert response.status_code == 422  # Validation error for missing required parameter
+
+def test_add_validator_missing_auth():
+    """Test add validator without auth header."""
+    response = client.post("/api/v1/lite/private/add", json={
+        "validator_id": "new.validator.com",
+        "discord_user_id": 123456789
+    })
+    assert response.status_code == 401
+
+def test_add_validator_missing_param():
+    """Test add validator without required parameters."""
+    response = client.post("/api/v1/lite/private/add", json={}, headers={
+        "Authorization": "Bearer test_token"
+    })
+    assert response.status_code == 422  # Validation error for missing required parameters
 
 if __name__ == "__main__":
     pytest.main([__file__])

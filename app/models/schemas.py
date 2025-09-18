@@ -105,3 +105,21 @@ class ValidatorsListResponse(BaseModel):
                 }
             }
         }
+
+
+class ValidatorAddResponse(BaseModel):
+    """Response model for validator add request endpoint."""
+    success: bool
+    data: Dict[str, Any]
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "success": True,
+                "data": {
+                    "validator_id": "mysten.prod.mainnet.dev",
+                    "status": "submitted",
+                    "message": "Validator submitted for review. You'll be notified when it's added to the system."
+                }
+            }
+        }

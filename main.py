@@ -41,6 +41,10 @@ app.add_middleware(
 app.include_router(public_router, prefix="/api/v1/lite/public", tags=["lite-validation-public"])
 app.include_router(private_router, prefix="/api/v1/lite/private", tags=["lite-validation-private"])
 
+@app.get("/")
+def root():
+    return {"message": "Lite Validation API", "version": "0.1.0", "status": "running"}
+
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "version": "0.1.0"}

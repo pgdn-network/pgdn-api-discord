@@ -27,7 +27,7 @@ from app.models.database import (
 from app.models.schemas import (
     ValidatorLiteRequest as ValidatorLiteRequestSchema, ValidatorLiteResponse,
     ValidatorLiteValidationResponse, ValidatorNodeInfoResponse, ValidatorRescanResponse,
-    UserWelcomedResponse, ValidatorsListResponse
+    UserWelcomedResponse, ValidatorsListResponse, ValidatorAddResponse
 )
 from app.services.redis_cache import get_lite_validation_cache
 
@@ -43,6 +43,7 @@ LITE_TOKEN_EXPIRY_MINUTES = int(os.getenv("LITE_TOKEN_EXPIRY_MINUTES", "45"))
 BASE_URL = os.getenv("BASE_URL", "https://api.pgdn.network")
 DISCORD_API_AUTH_TOKEN = os.getenv("DISCORD_API_AUTH_TOKEN")
 DISCORD_BOT_WEBHOOK_URL = os.getenv("DISCORD_BOT_WEBHOOK_URL", "http://localhost:8080/webhook/send-message")
+DISCORD_NOTIFICATION_CHANNEL = os.getenv("DISCORD_NOTIFICATION_CHANNEL")
 
 # Simple in-memory rate limiting
 _rate_limits: Dict[str, deque] = defaultdict(deque)
@@ -137,6 +138,51 @@ def send_discord_validation_success_notification(discord_user_id: int, validator
         return False
     except Exception as e:
         logger.error(f"Unexpected error sending Discord notification: {e}")
+        return False
+
+def send_discord_admin_notification(action: str, discord_user_id: int, validator_id: str) -> bool:
+    """Send Discord notification to admin channel for validator actions."""
+    if not DISCORD_NOTIFICATION_CHANNEL or not DISCORD_API_AUTH_TOKEN:
+        logger.warning("Discord notification channel or token not configured, skipping admin notification")
+        return False
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {DISCORD_API_AUTH_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        if action == "add":
+            message = f"User {discord_user_id} wants to add validator: {validator_id}"
+        elif action == "rescan":
+            message = f"User {discord_user_id} requested rescan for: {validator_id}"
+        else:
+            message = f"User {discord_user_id} performed {action} on validator: {validator_id}"
+
+        payload = {
+            "user_id": discord_user_id,
+            "message": message
+        }
+
+        response = requests.post(
+            DISCORD_NOTIFICATION_CHANNEL,
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            logger.info(f"Successfully sent Discord admin notification for {action} by user {discord_user_id}")
+            return True
+        else:
+            logger.warning(f"Discord admin notification returned {response.status_code}: {response.text}")
+            return False
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to send Discord admin notification for {action}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error sending Discord admin notification: {e}")
         return False
 
 def validate_validator_ip(validator_id: str, client_ip: str, session: Session) -> tuple[bool, Optional[str], Optional[str]]:
@@ -373,23 +419,23 @@ async def validate_validator_ownership(
 # Path: /api/v1/lite/private/*
 # =============================================================================
 
-@private_router.post("/request", response_model=ValidatorLiteResponse)
-async def request_validator_validation(
+@private_router.post("/claim", response_model=ValidatorLiteResponse)
+async def claim_validator_validation(
     request_data: ValidatorLiteRequestSchema,
     fastapi_request: Request,
     token: str = Depends(verify_discord_bot_token)
 ):
     """
-    PRIVATE: Request validator validation - Discord bot calls this endpoint.
+    PRIVATE: Claim validator validation - Discord bot calls this endpoint.
 
-    Creates a validation request and returns a URL for the validator operator to call.
+    Creates a validation request for existing validators and returns a URL for the validator operator to call.
     Optionally includes a short-lived token for additional security.
 
-    URL: /api/v1/lite/private/request
+    URL: /api/v1/lite/private/claim
     """
     # Rate limiting
     client_ip = get_client_ip(fastapi_request)
-    if not check_rate_limit(client_ip, "/private/request", max_requests=5, window=3600):
+    if not check_rate_limit(client_ip, "/private/claim", max_requests=5, window=3600):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Rate limit exceeded. Please try again later."
@@ -438,7 +484,7 @@ async def request_validator_validation(
             if not node:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Validator not in our system yet. We'll add it soon and message you when done!"
+                    detail="validator not found"
                 )
 
             # Check if this validator has already been validated by any user
@@ -695,6 +741,9 @@ async def request_validator_rescan(
             session.add(rescan_log)
             session.commit()
 
+            # Send Discord admin notification for rescan request
+            send_discord_admin_notification("rescan", discord_user_id, validator_address)
+
             logger.info(f"Rescan request logged: {rescan_log.uuid} for validator {validator_address}")
 
             # Return not available message
@@ -779,4 +828,69 @@ async def get_user_validators_list(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch user validators"
+        )
+
+
+@private_router.post("/add", response_model=ValidatorAddResponse)
+async def add_validator_request(
+    request_data: ValidatorLiteRequestSchema,
+    fastapi_request: Request,
+    token: str = Depends(verify_discord_bot_token)
+):
+    """
+    PRIVATE: Submit validator for addition to PGDN system - Discord bot calls this endpoint.
+
+    Submits a request to add a new validator to the system. The validator will be reviewed
+    by administrators and added manually. User will be notified when the validator is available.
+
+    URL: /api/v1/lite/private/add
+    """
+    # Rate limiting
+    client_ip = get_client_ip(fastapi_request)
+    if not check_rate_limit(client_ip, "/private/add", max_requests=3, window=3600):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Please try again later."
+        )
+
+    logger.info(f"Validator add request for validator_id: {request_data.validator_id}, discord_user_id: {request_data.discord_user_id}")
+
+    try:
+        with get_db_session() as session:
+            # Check if validator already exists in the system
+            existing_node = session.query(Node).filter(Node.address == request_data.validator_id).first()
+            if existing_node:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Validator already exists in system"
+                )
+
+            # Basic validator format validation (same as existing validation)
+            if not request_data.validator_id or len(request_data.validator_id.strip()) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid validator format"
+                )
+
+            # Send Discord admin notification
+            send_discord_admin_notification("add", request_data.discord_user_id, request_data.validator_id)
+
+            logger.info(f"Validator add request submitted for {request_data.validator_id} by user {request_data.discord_user_id}")
+
+            return ValidatorAddResponse(
+                success=True,
+                data={
+                    "validator_id": request_data.validator_id,
+                    "status": "submitted",
+                    "message": "Validator submitted for review. You'll be notified when it's added to the system."
+                }
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing validator add request: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process add request"
         )
