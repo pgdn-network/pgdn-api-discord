@@ -1,0 +1,18 @@
+# Ultra-minimal requirements for lite validation API
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic[email]==2.5.0
+python-dotenv==1.0.0
+
+# Database
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+
+# Redis for caching
+redis[hiredis]==5.0.1
+
+# HTTP requests for Discord webhooks
+requests==2.31.0
+
+# Testing (optional)
+pytest==7.4.3

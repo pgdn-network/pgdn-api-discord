@@ -1,0 +1,126 @@
+---
+description: Development, testing, and architecture guidance for working with the PGDN agentic security scanner.
+globs: 
+alwaysApply: true
+---
+---
+description: Development and architecture guidance for running the FastAPI PGDN application with Docker, PostgreSQL, and Redis.
+globs:
+  - main.py
+  - routers/**/*.py
+  - middleware/**/*.py
+  - *.sql
+  - *.env*
+  - docker-compose.yml
+  - database.py
+  - schemas.py
+  - auth.py
+  - deps.py
+alwaysApply: true
+---
+
+# PGDN FastAPI App Guide
+
+## Running the Application
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the FastAPI application locally
+python main.py
+# OR
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+# Run with Docker Compose (includes PostgreSQL and Redis)
+docker-compose up --build
+
+# Run only the database service
+docker-compose up db
+```
+
+## Environment Setup
+
+```bash
+cp .env.example .env
+# Edit .env with required values:
+# DATABASE_URL, SECRET_KEY
+```
+
+## Database Operations
+
+```bash
+psql -U depin_user -d depin
+\i setup_tables.sql
+
+# Local DATABASE_URL:
+# postgresql://simon@localhost:5432/depin
+
+# Docker DATABASE_URL:
+# postgresql://depin_user:secure_password_change_me@localhost:5432/depin
+```
+
+## Architecture Overview
+
+### Application Structure
+
+- `main.py`: FastAPI entry point with PGDN integration
+- `routers/`: API endpoints (auth, users, orgs, scans)
+- `middleware/`: Security layers (rate limit, validation)
+- `database.py`: PostgreSQL logic via psycopg2
+- `schemas.py`: Pydantic models
+- `auth.py`: JWT auth & OAuth2
+- `deps.py`: Dependency injection (DB/auth)
+
+### PGDN Integration
+
+- Loads config from `config.json` using `pgdn.initialize_application()`
+- Access PGDN config via `app.state.pgdn_config`
+- Tied into scanning endpoints for validator networks
+
+### Authentication & Security
+
+- JWT auth (30min access, 7d refresh)
+- Bcrypt password hashing (14 rounds)
+- SecurityMiddleware (rate limit: 100/hr)
+- RequestValidationMiddleware for SQLi prevention
+- HaveIBeenPwned breach check
+
+### Database Layer
+
+- PostgreSQL with RealDictCursor
+- Secure password handling
+- Organization multi-tenancy
+- Shared `get_db_connection()` management
+
+### API Endpoints
+
+- `/api/v1/register`: Signup + org creation
+- `/api/v1/login`: Login via OAuth2
+- `/api/v1/me`: Authenticated user info
+- `/api/v1/organizations/{uuid}/scan`: Org-specific scan trigger
+- `/health`: Liveness check
+
+### Security Features
+
+- Rate limiting via middleware
+- Password validation (12+ chars, complexity, breach check)
+- Audit logging
+- CORS with env-based ALLOWED_ORIGINS
+
+### Docker Stack
+
+- PostgreSQL 15 + persistent volume
+- Redis 7 + password
+- API service with checks
+- Auto-init DB via `setup_tables.sql`
+
+### Dependencies
+
+- `fastapi`
+- `uvicorn`
+- `psycopg2-binary`
+- `python-jose[cryptography]`
+- `passlib[bcrypt]`
+- `pydantic[email]`
+- `python-multipart`

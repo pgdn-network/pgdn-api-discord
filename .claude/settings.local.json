@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm:*)",
+      "Bash(grep:*)",
+      "Bash(pip install:*)",
+      "Bash(git add:*)",
+      "Bash(source .env)",
+      "Bash(python -m pytest tests/test_discovery.py::TestDetermineMatchedProtocols::test_determine_matched_protocols_success -v)",
+      "Bash(source:*)",
+      "Bash(python -m pytest tests/test_discovery.py -v)",
+      "Bash(alembic upgrade:*)",
+      "Bash(alembic current:*)",
+      "Bash(alembic revision:*)",
+      "Bash(python -m pytest tests/test_interventions.py -v)",
+      "Bash(git commit:*)",
+      "Bash(env)",
+      "Bash(psql:*)",
+      "WebFetch(domain:localhost)",
+      "Bash(mkdir:*)",
+      "Bash(find:*)",
+      "Bash(pytest:*)",
+      "Bash(rg:*)",
+      "Bash(python -m pytest tests/test_routes_scan.py -v)",
+      "Bash(python:*)",
+      "Bash(git push:*)",
+      "Bash(timeout:*)",
+      "Bash(DISCORD_API_AUTH_TOKEN=test_token python -m pytest test_lite_validation.py -v)"
+    ],
+    "deny": []
+  }
+}
