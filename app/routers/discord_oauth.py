@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 # Local imports
 from app.utils.oauth_state import generate_state, validate_state, get_state_signing_key
-from app.utils.discord_api import DiscordOAuth, DiscordBot, DiscordAPIError, get_allowed_guild_ids
+from app.utils.discord_api import DiscordOAuth, DiscordAPIError, get_allowed_guild_ids
 from app.models.database import get_db_session, mark_verified, mark_unverified
 from app.services.redis_cache import get_lite_validation_cache
 
@@ -194,7 +194,6 @@ async def discord_oauth_callback(
 
         # Initialize services
         oauth = DiscordOAuth()
-        bot = DiscordBot()
         cache = get_lite_validation_cache()
         allowed_guild_ids = get_allowed_guild_ids()
 
@@ -253,11 +252,7 @@ async def discord_oauth_callback(
                 except Exception as e:
                     logger.error(f"Database update failed for user {user_id}: {e}")
 
-                # Send failure DM with account age reason
-                try:
-                    bot.send_verification_failure_message(user_id, "account_age")
-                except Exception as e:
-                    logger.warning(f"Failed to send failure DM to user {user_id}: {e}")
+                # Note: Failure notifications handled by bot's verification system
 
                 return HTMLResponse(
                     content=create_styled_response(
@@ -316,11 +311,12 @@ async def discord_oauth_callback(
                 logger.error(f"Database update failed for user {user_id}: {e}")
                 # Continue - Redis cache is set, so bot can still work
 
-            # Send success DM (optional, failures don't affect response)
+            # Send success notification via webhook (optional, failures don't affect response)
             try:
-                bot.send_verification_success_message(user_id)
+                from app.routers.lite_validation import send_discord_validation_success_notification
+                send_discord_validation_success_notification(user_id, "Discord verification")
             except Exception as e:
-                logger.warning(f"Failed to send success DM to user {user_id}: {e}")
+                logger.warning(f"Failed to send success notification to user {user_id}: {e}")
 
             return HTMLResponse(
                 content=create_styled_response(
@@ -347,11 +343,7 @@ async def discord_oauth_callback(
             except Exception as e:
                 logger.error(f"Database update failed for user {user_id}: {e}")
 
-            # Send failure DM with guild membership reason
-            try:
-                bot.send_verification_failure_message(user_id, "guild_membership")
-            except Exception as e:
-                logger.warning(f"Failed to send failure DM to user {user_id}: {e}")
+            # Note: Failure notifications handled by bot's verification system
 
             return HTMLResponse(
                 content=create_styled_response(

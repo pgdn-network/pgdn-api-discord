@@ -57,15 +57,16 @@ class ClaimStatus(str, Enum):
 
 class SimpleNodeState(str, Enum):
     """Simplified node states."""
-    NEW = "new"
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    DISABLED = "disabled"
+    NEW = "NEW"
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    DISABLED = "DISABLED"
 
 class DiscoveryStatus(str, Enum):
     """Node discovery status."""
     PENDING = "pending"
     DISCOVERED = "discovered"
+    COMPLETED = "completed"
     FAILED = "failed"
 
 class ConnectivityStatus(str, Enum):
@@ -104,7 +105,7 @@ class Node(Base):
     name = Column(String(255))
     address = Column(String(255), nullable=False)  # hostname/address of the node
     status = Column(String(50), default='new')
-    simple_state = Column(SQLEnum(SimpleNodeState), default=SimpleNodeState.NEW)
+    simple_state = Column(String(50), default='NEW')
     validated = Column(Boolean, default=False)
     discovery_status = Column(SQLEnum(DiscoveryStatus), default=DiscoveryStatus.PENDING)
     connectivity_status = Column(SQLEnum(ConnectivityStatus), default=ConnectivityStatus.UNKNOWN)
@@ -199,10 +200,10 @@ class DiscordGuildVerification(Base):
 class NodeTimeseries(Base):
     """Node timeseries data for info display."""
     __tablename__ = 'node_timeseries'
+    __table_args__ = {'schema': 'sui_scanner'}
 
-    id = Column(Integer, primary_key=True)
-    node_key = Column(String(100), nullable=False)  # Usually node UUID as string
-    observed_ts = Column(DateTime, nullable=False)
+    node_key = Column(String(100), primary_key=True)  # Usually node UUID as string
+    observed_ts = Column(DateTime, primary_key=True)  # Composite primary key with node_key
 
     # Performance metrics
     tps = Column(String(20))
@@ -402,10 +403,13 @@ def get_user_validators(session: Session, discord_user_id: int) -> dict:
             ValidatorLiteRequest.status == ValidatorLiteRequestStatus.VALIDATED
         ).all()
 
+        logger.info(f"Database query found {len(validated_requests)} validated requests for user {discord_user_id}")
+
         validators = []
         primary_validator_id = None
 
         for req in validated_requests:
+            logger.info(f"Processing validator: {req.validator_id}, status: {req.status}, updated: {req.updated_at}")
             validator_info = {
                 "validator_id": req.validator_id,
                 "validator_address": req.validation_ip,
@@ -418,6 +422,8 @@ def get_user_validators(session: Session, discord_user_id: int) -> dict:
             # Set first validator as primary
             if primary_validator_id is None:
                 primary_validator_id = req.validator_id
+
+        logger.info(f"Built validators list with {len(validators)} entries")
 
         # Return appropriate structure based on count
         if len(validators) == 0:
@@ -435,6 +441,8 @@ def get_user_validators(session: Session, discord_user_id: int) -> dict:
 
     except Exception as e:
         logger.error(f"Error fetching user validators: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return {
             "validators": [],
             "total_count": 0,

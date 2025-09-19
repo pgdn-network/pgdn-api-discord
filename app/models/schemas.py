@@ -123,3 +123,29 @@ class ValidatorAddResponse(BaseModel):
                 }
             }
         }
+
+
+class FeedbackRequest(BaseModel):
+    """Request model for user feedback submission."""
+    discord_user_id: int = Field(..., description="Discord user ID as integer")
+    message: str = Field(..., min_length=1, max_length=1000, description="Feedback message (max 1000 characters)")
+
+    @validator('message')
+    def validate_message(cls, v):
+        if not v or len(v.strip()) == 0:
+            raise ValueError('Feedback message cannot be empty')
+        return v.strip()
+
+
+class FeedbackResponse(BaseModel):
+    """Response model for feedback submission."""
+    success: bool
+    message: str
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Feedback submitted successfully"
+            }
+        }

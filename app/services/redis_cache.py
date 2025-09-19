@@ -4,8 +4,11 @@ Simple Redis caching for lite validation API.
 
 import os
 import logging
+from datetime import datetime
 import redis.asyncio as redis
 from typing import Optional
+
+from app.models.database import get_db_session, DiscordGuildVerification
 
 logger = logging.getLogger(__name__)
 
@@ -137,44 +140,57 @@ class LiteValidationCache:
         expiry = ttl or self.default_expiry
         return await cache.set_with_expiry(key, result, expiry)
 
-    async def check_daily_info_limit(self, discord_user_id: int, validator_id: str) -> bool:
-        """Check daily info limit (1 per minute)."""
+    async def check_command_rate_limit(self, command: str, discord_user_id: int, max_requests: int, window_seconds: int) -> bool:
+        """Check if user has exceeded rate limit for a command."""
         cache = await self._get_redis()
-        key = f"lite_info:{discord_user_id}:{validator_id}:minute"
+        key = f"lite_{command}:{discord_user_id}:global:window"
+
+        if not cache.redis:
+            return False
+
+        try:
+            current_count = await cache.redis.get(key)
+            if current_count is None:
+                return False
+            return int(current_count) >= max_requests
+        except Exception as e:
+            logger.error(f"Error checking {command} rate limit: {e}")
+            return False
+
+    async def increment_command_counter(self, command: str, discord_user_id: int, window_seconds: int) -> bool:
+        """Increment command counter with sliding window."""
+        cache = await self._get_redis()
+        key = f"lite_{command}:{discord_user_id}:global:window"
+
+        if not cache.redis:
+            return False
+
+        try:
+            # Use Redis INCR to atomically increment counter
+            await cache.redis.incr(key)
+            # Set TTL only if this is the first increment
+            ttl = await cache.redis.ttl(key)
+            if ttl == -1:  # No TTL set
+                await cache.redis.expire(key, window_seconds)
+            return True
+        except Exception as e:
+            logger.error(f"Error incrementing {command} counter: {e}")
+            return False
+
+    async def check_add_request_exists(self, discord_user_id: int, validator_id: str) -> bool:
+        """Check if user has already submitted an add request for this validator."""
+        cache = await self._get_redis()
+        key = f"lite_add_request:{discord_user_id}:{validator_id}"
         result = await cache.get(key)
         return result is not None
 
-    async def set_daily_info_limit(self, discord_user_id: int, validator_id: str) -> bool:
-        """Set daily info limit."""
+    async def set_add_request_block(self, discord_user_id: int, validator_id: str, ttl_hours: int = 24) -> bool:
+        """Set block to prevent duplicate add requests for this validator."""
         cache = await self._get_redis()
-        key = f"lite_info:{discord_user_id}:{validator_id}:minute"
-        return await cache.set_with_expiry(key, "requested", 60)
+        key = f"lite_add_request:{discord_user_id}:{validator_id}"
+        ttl_seconds = ttl_hours * 3600
+        return await cache.set_with_expiry(key, "submitted", ttl_seconds)
 
-    async def check_rescan_limit(self, discord_user_id: int, validator_id: str) -> bool:
-        """Check rescan limit (1 per minute)."""
-        cache = await self._get_redis()
-        key = f"lite_rescan:{discord_user_id}:{validator_id}:minute"
-        result = await cache.get(key)
-        return result is not None
-
-    async def set_rescan_limit(self, discord_user_id: int, validator_id: str) -> bool:
-        """Set rescan limit."""
-        cache = await self._get_redis()
-        key = f"lite_rescan:{discord_user_id}:{validator_id}:minute"
-        return await cache.set_with_expiry(key, "requested", 60)
-
-    async def check_daily_rescan_limit(self, discord_user_id: int, validator_id: str) -> bool:
-        """Check daily rescan limit."""
-        cache = await self._get_redis()
-        key = f"lite_rescan:{discord_user_id}:{validator_id}:daily"
-        result = await cache.get(key)
-        return result is not None
-
-    async def set_daily_rescan_limit(self, discord_user_id: int, validator_id: str) -> bool:
-        """Set daily rescan limit."""
-        cache = await self._get_redis()
-        key = f"lite_rescan:{discord_user_id}:{validator_id}:daily"
-        return await cache.set_with_expiry(key, "requested", 86400)
 
     async def check_and_mark_user_welcomed(self, discord_user_id: int) -> bool:
         """Check if user is new and mark as welcomed."""
@@ -203,6 +219,43 @@ class LiteValidationCache:
         key = f"lite_add:{discord_user_id}:daily"
         return await cache.set_with_expiry(key, "requested", 86400)
 
+    async def check_daily_feedback_limit(self, discord_user_id: int) -> bool:
+        """Check daily feedback limit (5 per day per user)."""
+        cache = await self._get_redis()
+        key = f"lite_feedback:{discord_user_id}:daily"
+
+        if not cache.redis:
+            return False
+
+        try:
+            count = await cache.redis.get(key)
+            if count is None:
+                return False
+            return int(count) >= 5
+        except Exception as e:
+            logger.error(f"Error checking feedback limit: {e}")
+            return False
+
+    async def increment_daily_feedback_limit(self, discord_user_id: int) -> bool:
+        """Increment daily feedback counter."""
+        cache = await self._get_redis()
+        key = f"lite_feedback:{discord_user_id}:daily"
+
+        if not cache.redis:
+            return False
+
+        try:
+            # Use Redis INCR to atomically increment counter
+            await cache.redis.incr(key)
+            # Set TTL only if this is the first increment
+            ttl = await cache.redis.ttl(key)
+            if ttl == -1:  # No TTL set
+                await cache.redis.expire(key, 86400)  # 24 hours
+            return True
+        except Exception as e:
+            logger.error(f"Error incrementing feedback limit: {e}")
+            return False
+
     # Guild Verification Caching
     async def get_guild_verification_status(self, discord_user_id: int) -> Optional[str]:
         """Get guild verification status from Redis cache with database fallback."""
@@ -212,8 +265,6 @@ class LiteValidationCache:
 
         # If not in Redis, check database for unexpired verification
         if result is None:
-            from app.models.database import get_db_session, DiscordGuildVerification
-            from datetime import datetime
 
             try:
                 with get_db_session() as session:
