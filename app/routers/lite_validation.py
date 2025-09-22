@@ -503,54 +503,33 @@ async def claim_validator_validation(
 @private_router.get("/info", response_model=ValidatorNodeInfoResponse)
 async def get_validator_info(
     discord_user_id: int,
+    validator_address: str,
     fastapi_request: Request,
-    token: str = Depends(verify_discord_bot_token),
-    validator_address: Optional[str] = None
+    token: str = Depends(verify_discord_bot_token)
 ):
     """
-    PRIVATE: Get validator node information for Discord slash command.
+    PRIVATE: Get validator node information for specific validator hostname.
+
+    Required parameter: validator_address (hostname)
 
     Logic:
-    - No address + 0 validators: Error "must provide address"
-    - No address + 1 validator: Return full data for that validator
-    - No address + >1 validators: Return validator list
-    - With address + owned: Return full data
-    - With address + not owned: Return score only
+    - If user owns validator: Return full data
+    - If user doesn't own validator: Return score only
 
     Rate limited to 5 requests per minute per user.
 
-    URL: /api/v1/lite/private/info
+    URL: /api/v1/lite/private/info?discord_user_id={user_id}&validator_address={hostname}
     """
-    logger.info(f"Discord info request for validator {validator_address or 'unspecified'} from user {discord_user_id}")
+    logger.info(f"Discord info request for validator {validator_address} from user {discord_user_id}")
 
     cache = get_lite_validation_cache()
 
     try:
         with get_db_session() as session:
 
-            # Use service layer for validator selection - allow non-owned validators for info
-            success, selected_validator, validator_list, selection_message, user_owns_validator = resolve_validator_selection(
-                session, discord_user_id, validator_address, require_ownership=False
-            )
-
-            if not success:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=selection_message
-                )
-
-            # If we got a validator list, return it to the user
-            if validator_list is not None:
-                return ValidatorNodeInfoResponse(
-                    success=True,
-                    validator_address="multiple",
-                    discord_user_id=discord_user_id,
-                    message="Multiple validators found. Please specify one.",
-                    node_data={"validators": validator_list, "count": len(validator_list)}
-                )
-
-            # We have a selected validator
-            validator_address = selected_validator
+            # Check if user owns this validator
+            user_validators = get_user_validators(session, discord_user_id)
+            user_owns_validator = any(v.validator_id == validator_address for v in user_validators)
 
             # Rate limit check - 5 requests per minute for info command
             if await cache.check_command_rate_limit("info", discord_user_id, 5, 60):
