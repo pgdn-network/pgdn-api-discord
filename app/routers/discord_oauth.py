@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 # Local imports
 from app.utils.oauth_state import generate_state, validate_state, get_state_signing_key
-from app.utils.discord_api import DiscordOAuth, DiscordAPIError, get_allowed_guild_ids, get_allowed_test_usernames
+from app.utils.discord_api import DiscordOAuth, DiscordAPIError, get_allowed_guild_ids, get_allowed_test_user_ids
 from app.models.database import get_db_session, mark_verified, mark_unverified
 from app.services.redis_cache import get_lite_validation_cache
 
@@ -238,12 +238,12 @@ async def discord_oauth_callback(
 
             logger.info(f"User {user_info_response.get('username')} - Account age: {account_age_days} days ({account_age_days // 365} years), Email verified: {user_info_response.get('verified', 'Unknown')}")
 
-            # Check if username is in test allowlist (bypasses all verification)
-            allowed_usernames = get_allowed_test_usernames()
-            current_username = user_info_response.get('username', '').lower()
+            # Check if user ID is in test allowlist (bypasses all verification)
+            allowed_user_ids = get_allowed_test_user_ids()
+            current_user_id = str(user_id)  # Convert to string for comparison
 
-            if current_username in allowed_usernames:
-                logger.info(f"Username '{current_username}' is in test allowlist - bypassing all verification checks")
+            if current_user_id in allowed_user_ids:
+                logger.info(f"User ID '{current_user_id}' ({user_info_response.get('username', 'unknown')}) is in test allowlist - bypassing all verification checks")
                 # Set flag to bypass verification and use existing success logic
                 is_member = True
                 matched_guilds = ["allowlist"]  # Dummy value for logging

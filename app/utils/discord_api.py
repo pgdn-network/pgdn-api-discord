@@ -178,13 +178,13 @@ def get_allowed_guild_ids() -> List[str]:
     return guild_ids
 
 
-def get_allowed_test_usernames() -> set:
-    """Get allowed test usernames from environment for bypassing verification."""
-    usernames_str = os.getenv("ALLOWED_TEST_USERNAMES", "")
-    if not usernames_str:
+def get_allowed_test_user_ids() -> set:
+    """Get allowed test user IDs from environment for bypassing verification."""
+    user_ids_str = os.getenv("ALLOWED_TEST_USER_IDS", "")
+    if not user_ids_str:
         return set()
 
-    usernames = {username.strip().lower() for username in usernames_str.split(",") if username.strip()}
-    if usernames:
-        logger.info(f"Loaded {len(usernames)} allowed test usernames for verification bypass")
-    return usernames
+    user_ids = {user_id.strip() for user_id in user_ids_str.split(",") if user_id.strip()}
+    if user_ids:
+        logger.info(f"Loaded {len(user_ids)} allowed test user IDs for verification bypass")
+    return user_ids
