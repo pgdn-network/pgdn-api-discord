@@ -241,6 +241,7 @@ async def discord_oauth_callback(
             # Check if user ID is in test allowlist (bypasses all verification)
             allowed_user_ids = get_allowed_test_user_ids()
             current_user_id = str(user_id)  # Convert to string for comparison
+            logger.info(f"Allowlist check: user_id='{current_user_id}', allowed_user_ids={allowed_user_ids}")
 
             if current_user_id in allowed_user_ids:
                 logger.info(f"User ID '{current_user_id}' ({user_info_response.get('username', 'unknown')}) is in test allowlist - bypassing all verification checks")
