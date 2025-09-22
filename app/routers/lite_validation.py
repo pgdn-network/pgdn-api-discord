@@ -697,9 +697,11 @@ async def request_validator_rescan(
     try:
         with get_db_session() as session:
             # Step 1: Resolve validator selection using service layer
+            logger.info(f"About to call resolve_validator_selection with discord_user_id={discord_user_id}, validator_address={validator_address}")
             success, selected_validator, validator_list, selection_message, user_owns_validator = resolve_validator_selection(
                 session, discord_user_id, validator_address
             )
+            logger.info(f"resolve_validator_selection returned: success={success}, selected_validator={selected_validator}, user_owns_validator={user_owns_validator}")
 
             if not success:
                 raise HTTPException(
