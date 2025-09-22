@@ -528,9 +528,9 @@ async def get_validator_info(
     try:
         with get_db_session() as session:
 
-            # Use service layer for validator selection
-            success, selected_validator, validator_list, selection_message = resolve_validator_selection(
-                session, discord_user_id, validator_address
+            # Use service layer for validator selection - allow non-owned validators for info
+            success, selected_validator, validator_list, selection_message, user_owns_validator = resolve_validator_selection(
+                session, discord_user_id, validator_address, require_ownership=False
             )
 
             if not success:
@@ -551,10 +551,6 @@ async def get_validator_info(
 
             # We have a selected validator
             validator_address = selected_validator
-
-            # Get user's validators to check ownership (for determining full vs limited data)
-            user_validators = get_user_validators(session, discord_user_id)
-            user_owns_validator = any(v.validator_id == validator_address for v in user_validators)
 
             # Rate limit check - 5 requests per minute for info command
             if await cache.check_command_rate_limit("info", discord_user_id, 5, 60):
@@ -722,7 +718,7 @@ async def request_validator_rescan(
     try:
         with get_db_session() as session:
             # Step 1: Resolve validator selection using service layer
-            success, selected_validator, validator_list, selection_message = resolve_validator_selection(
+            success, selected_validator, validator_list, selection_message, user_owns_validator = resolve_validator_selection(
                 session, discord_user_id, validator_address
             )
 

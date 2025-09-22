@@ -357,8 +357,9 @@ def get_user_validators(session: Session, discord_user_id: int) -> List[Validato
 def resolve_validator_selection(
     session: Session,
     discord_user_id: int,
-    validator_address: Optional[str] = None
-) -> Tuple[bool, Optional[str], Optional[List[Dict[str, Any]]], str]:
+    validator_address: Optional[str] = None,
+    require_ownership: bool = True
+) -> Tuple[bool, Optional[str], Optional[List[Dict[str, Any]]], str, bool]:
     """
     Resolve validator selection using the same logic as the info endpoint.
 
@@ -366,12 +367,14 @@ def resolve_validator_selection(
         session: Database session
         discord_user_id: Discord user ID
         validator_address: Optional validator address
+        require_ownership: Whether validator ownership is required (default True)
 
     Returns:
-        Tuple of (success, selected_validator_address, validator_list, message)
+        Tuple of (success, selected_validator_address, validator_list, message, user_owns_validator)
         - If success=True and validator_list=None: Use selected_validator_address
         - If success=True and validator_list is not None: Return list to user
         - If success=False: Error occurred, message contains error
+        - user_owns_validator: Whether user owns the selected validator
     """
     try:
         logger.info(f"Resolving validator selection for user {discord_user_id}, address: {validator_address}")
@@ -383,12 +386,12 @@ def resolve_validator_selection(
         # Handle case where no validator_address provided
         if not validator_address:
             if validator_count == 0:
-                return False, None, None, "You must provide a validator address"
+                return False, None, None, "You must provide a validator address", False
             elif validator_count == 1:
                 # Use the single validator they have
                 selected_address = user_validators[0].validator_id
                 logger.info(f"Auto-selected single validator: {selected_address}")
-                return True, selected_address, None, f"Using your validator: {selected_address}"
+                return True, selected_address, None, f"Using your validator: {selected_address}", True
             else:
                 # Return list of validators
                 validator_list = [
@@ -398,20 +401,24 @@ def resolve_validator_selection(
                     }
                     for v in user_validators
                 ]
-                return True, None, validator_list, "Multiple validators found. Please specify one."
+                return True, None, validator_list, "Multiple validators found. Please specify one.", True
 
         # validator_address was provided - check if user owns it
         user_owns_validator = any(v.validator_id == validator_address for v in user_validators)
 
-        if not user_owns_validator:
-            return False, None, None, f"You don't own validator {validator_address} or it hasn't been validated within 90 days."
+        if not user_owns_validator and require_ownership:
+            return False, None, None, f"You don't own validator {validator_address} or it hasn't been validated within 90 days.", False
 
-        logger.info(f"User owns validator: {validator_address}")
-        return True, validator_address, None, f"Using validator: {validator_address}"
+        if user_owns_validator:
+            logger.info(f"User owns validator: {validator_address}")
+            return True, validator_address, None, f"Using validator: {validator_address}", True
+        else:
+            logger.info(f"User does not own validator: {validator_address}, but ownership not required")
+            return True, validator_address, None, f"Using validator: {validator_address}", False
 
     except Exception as e:
         logger.error(f"Error resolving validator selection: {e}")
-        return False, None, None, "Failed to resolve validator selection"
+        return False, None, None, "Failed to resolve validator selection", False
 
 
 def validate_rescan_authority(
