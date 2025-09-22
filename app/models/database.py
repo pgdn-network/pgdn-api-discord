@@ -425,26 +425,17 @@ def get_user_validators(session: Session, discord_user_id: int) -> dict:
 
         logger.info(f"Built validators list with {len(validators)} entries")
 
-        # Return appropriate structure based on count
-        if len(validators) == 0:
-            return {
-                "validators": [],
-                "total_count": 0,
-                "score": None
-            }
-        else:
-            return {
-                "validators": validators,
-                "total_count": len(validators),
-                "primary_validator_id": primary_validator_id
-            }
+        # Return consistent structure regardless of count
+        return {
+            "data": validators,
+            "total_count": len(validators)
+        }
 
     except Exception as e:
         logger.error(f"Error fetching user validators: {e}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return {
-            "validators": [],
-            "total_count": 0,
-            "score": None
+            "data": [],
+            "total_count": 0
         }
