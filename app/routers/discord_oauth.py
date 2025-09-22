@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 # Local imports
 from app.utils.oauth_state import generate_state, validate_state, get_state_signing_key
-from app.utils.discord_api import DiscordOAuth, DiscordAPIError, get_allowed_guild_ids
+from app.utils.discord_api import DiscordOAuth, DiscordAPIError, get_allowed_guild_ids, get_allowed_test_usernames
 from app.models.database import get_db_session, mark_verified, mark_unverified
 from app.services.redis_cache import get_lite_validation_cache
 
@@ -237,6 +237,45 @@ async def discord_oauth_callback(
             account_age_days = (datetime.utcnow() - account_created).days
 
             logger.info(f"User {user_info_response.get('username')} - Account age: {account_age_days} days ({account_age_days // 365} years), Email verified: {user_info_response.get('verified', 'Unknown')}")
+
+            # Check if username is in test allowlist (bypasses all verification)
+            allowed_usernames = get_allowed_test_usernames()
+            current_username = user_info_response.get('username', '').lower()
+
+            if current_username in allowed_usernames:
+                logger.info(f"Username '{current_username}' is in test allowlist - bypassing all verification checks")
+
+                # Calculate expiration for successful verification
+                expires_at = datetime.utcnow() + timedelta(days=VERIFY_SUCCESS_TTL_DAYS)
+
+                # Update Redis cache
+                await cache.set_guild_verification_success(user_id, VERIFY_SUCCESS_TTL_DAYS)
+
+                # Update database
+                try:
+                    with get_db_session() as session:
+                        mark_verified(session, user_id, expires_at, allowed_guild_ids)
+                    logger.info(f"Database updated for allowlist verification of user {user_id}")
+                except Exception as e:
+                    logger.error(f"Database update failed for allowlist user {user_id}: {e}")
+                    # Continue - Redis cache is set, so bot can still work
+
+                # Send success notification via webhook (optional, failures don't affect response)
+                try:
+                    from app.routers.lite_validation import send_discord_validation_success_notification
+                    send_discord_validation_success_notification(user_id, "Discord verification")
+                except Exception as e:
+                    logger.warning(f"Failed to send success notification to allowlist user {user_id}: {e}")
+
+                return HTMLResponse(
+                    content=create_styled_response(
+                        "✅",
+                        "Verification Complete (Test User)",
+                        "Your account has been verified successfully using the test allowlist.",
+                        "You can return to Discord and use the bot commands."
+                    ),
+                    status_code=200
+                )
 
             # Check account age requirement
             if account_age_days < MIN_ACCOUNT_AGE_DAYS:

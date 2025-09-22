@@ -223,6 +223,7 @@ The application now includes Discord OAuth2 guild verification endpoints under `
 - `MIN_ACCOUNT_AGE_DAYS`: Minimum Discord account age in days (default: 7)
 - `BOT_TOKEN`: Discord bot token for sending success DMs (optional)
 - `OAUTH_BASE`: Discord API base URL (default: https://discord.com/api)
+- `ALLOWED_TEST_USERNAMES`: Comma-separated list of Discord usernames that bypass all verification checks for testing (optional)
 
 ## Docker Build Requirements
 
